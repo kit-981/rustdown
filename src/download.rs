@@ -1,11 +1,10 @@
-use crate::digest;
-use sha2::{Digest, Sha256};
+use crate::digest::Sha256;
 use std::{
     fmt::{self, Display, Formatter},
     io,
     path::PathBuf,
 };
-use tokio::{fs, io::AsyncReadExt};
+use tokio::fs;
 use tracing::{debug, info};
 use url::Url;
 
@@ -99,7 +98,7 @@ impl Default for Options {
 pub struct Download {
     pub url: Url,
     pub destination: PathBuf,
-    pub checksum: Option<digest::Sha256>,
+    pub checksum: Option<Sha256>,
 }
 
 impl Download {
@@ -115,23 +114,14 @@ impl Download {
 
                 PreservationStrategy::Checksum => {
                     if let Some(checksum) = &self.checksum {
-                        let mut bytes = Vec::new();
-                        let mut file =
-                            fs::File::open(&self.destination)
-                                .await
-                                .map_err(|error| Error::Io {
-                                    source: error,
-                                    path: self.destination.clone(),
-                                })?;
-
-                        file.read_to_end(&mut bytes)
+                        if Sha256::from_file(&self.destination)
                             .await
                             .map_err(|error| Error::Io {
                                 source: error,
                                 path: self.destination.clone(),
-                            })?;
-
-                        if Sha256::digest(bytes).as_ref() == checksum.0 {
+                            })?
+                            == *checksum
+                        {
                             info!("already downloaded");
                             return Ok(());
                         }
@@ -160,7 +150,7 @@ impl Download {
 
         let bytes = response.bytes().await?;
         if let Some(checksum) = &self.checksum {
-            if Sha256::digest(&bytes).as_ref() != checksum.0 {
+            if Sha256::from_slice(&bytes) != *checksum {
                 println!("{:?}", checksum);
                 return Err(Error::ChecksumMismatch {
                     url: self.url.clone(),
