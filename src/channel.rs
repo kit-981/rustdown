@@ -26,11 +26,6 @@ pub struct PackageData {
 }
 
 impl PackageData {
-    /// Returns the number of artefacts in the package data.
-    pub fn nartefacts(&self) -> usize {
-        self.artefacts.len()
-    }
-
     /// Returns the artefacts in the package data.
     pub fn artefacts(&self) -> impl Iterator<Item = (&String, &Artefact)> {
         self.artefacts.iter()

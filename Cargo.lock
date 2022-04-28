@@ -804,6 +804,7 @@ name = "rustdown"
 version = "1.0.0"
 dependencies = [
  "ahash",
+ "bytes",
  "clap",
  "eyre",
  "futures",

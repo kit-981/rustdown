@@ -9,29 +9,21 @@ mod download;
 use cache::Cache;
 use channel::Manifest;
 use clap::{Parser, Subcommand};
+use download::Downloader;
 use eyre::{eyre, Result, WrapErr};
-use reqwest::{Client, ClientBuilder};
 use std::{num::NonZeroUsize, path::PathBuf};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{info, Level};
 
-async fn synchronise(cache: &Cache, client: &Client, jobs: NonZeroUsize) -> Result<()> {
-    let options = download::Options {
-        preserve: download::PreservationStrategy::Always,
-    };
-
-    cache.refresh(client, options, jobs).await?;
+async fn synchronise(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
+    cache.refresh(&Downloader::default(), jobs).await?;
 
     info!("synchronised cache");
     Ok(())
 }
 
-async fn verify(cache: &Cache, client: &Client, jobs: NonZeroUsize) -> Result<()> {
-    let options = download::Options {
-        preserve: download::PreservationStrategy::Checksum,
-    };
-
-    cache.refresh(client, options, jobs).await?;
+async fn verify(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
+    cache.refresh(&Downloader::default(), jobs).await?;
 
     info!("verified cache");
     Ok(())
@@ -96,12 +88,9 @@ async fn main() -> Result<()> {
         Manifest::from_slice(bytes.as_slice()).wrap_err(eyre!("failed to deserialise manifest"))?;
 
     let cache = Cache::new(arguments.path, manifest);
-    let client = ClientBuilder::new()
-        .build()
-        .expect("failed to build client");
 
     match arguments.action {
-        Action::Synchronise => synchronise(&cache, &client, arguments.jobs).await,
-        Action::Verify => verify(&cache, &client, arguments.jobs).await,
+        Action::Synchronise => synchronise(&cache, arguments.jobs).await,
+        Action::Verify => verify(&cache, arguments.jobs).await,
     }
 }

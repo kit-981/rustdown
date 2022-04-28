@@ -1,15 +1,18 @@
 use crate::{
     channel::Manifest,
-    download::{self, Download},
+    digest::Sha256,
+    download::{self, Downloader},
 };
-use futures::{stream, TryStreamExt};
-use reqwest::Client;
+use futures::{stream, StreamExt, TryStreamExt};
 use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+    io,
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
-use tracing::{info, info_span};
-use tracing_futures::Instrument;
+use tokio::fs;
+use tracing::info;
 use url::Url;
 
 trait PathExt {
@@ -27,6 +30,45 @@ impl PathExt for Path {
         }
 
         self.strip_prefix("/").expect("path is not absolute")
+    }
+}
+
+#[derive(Debug)]
+pub enum RefreshError {
+    BadChecksum(Url),
+    Download(download::Error),
+    FileSystem(io::Error),
+}
+
+impl Display for RefreshError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadChecksum(url) => write!(f, "bad checksum for '{}'", url),
+            Self::Download(error) => error.fmt(f),
+            Self::FileSystem(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for RefreshError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::BadChecksum(_) => None,
+            Self::Download(error) => error.source(),
+            Self::FileSystem(error) => error.source(),
+        }
+    }
+}
+
+impl From<download::Error> for RefreshError {
+    fn from(error: download::Error) -> Self {
+        Self::Download(error)
+    }
+}
+
+impl From<io::Error> for RefreshError {
+    fn from(error: io::Error) -> Self {
+        Self::FileSystem(error)
     }
 }
 
@@ -55,52 +97,55 @@ impl Cache {
     /// Refreshes the cache.
     pub async fn refresh(
         &self,
-        client: &Client,
-        options: download::Options,
+        downloader: &Downloader,
         jobs: NonZeroUsize,
-    ) -> Result<(), download::Error> {
+    ) -> Result<(), RefreshError> {
         info!("found {} packages", self.manifest.npackages());
-        stream::iter(self.manifest.packages().flat_map(|(package, data)| {
-            info!(
-                package = package.as_str(),
-                "found {} artefacts",
-                data.nartefacts()
-            );
 
-            data.artefacts()
-                .filter(|(_, artefact)| artefact.available)
-                .flat_map(move |(target, artefact)| {
-                    [
-                        artefact.url.as_ref().map(|url| (url, artefact.hash)),
-                        artefact.xz_url.as_ref().map(|url| (url, artefact.xz_hash)),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .map(move |(url, hash)| {
-                        (
-                            target,
-                            artefact,
-                            Download {
-                                url: url.clone(),
-                                destination: self.locate(url),
-                                checksum: hash,
-                            },
-                        )
-                    })
-                })
-                .map(move |(target, _, download)| async move {
-                    download
-                        .run(client, options)
-                        .instrument(info_span!(
-                            "download",
-                            package = package.as_str(),
-                            target = target.as_str(),
-                        ))
-                        .await
-                })
-                .map(Ok)
+        stream::iter(self.manifest.packages().flat_map(|(package, data)| {
+            info!(package = package.as_str(), "found package");
+            data.artefacts().flat_map(|(_, artefact)| {
+                artefact
+                    .url
+                    .iter()
+                    .map(|url| (url, artefact.hash))
+                    .chain(artefact.xz_url.iter().map(|url| (url, artefact.xz_hash)))
+            })
         }))
-        .try_for_each_concurrent(jobs.get(), |download| download)
+        .filter_map(|(url, hash)| async move {
+            match hash {
+                Some(expect) => match Sha256::from_file(&self.locate(url)).await {
+                    Ok(actual) => {
+                        if expect == actual {
+                            info!(url = url.as_str(), "already downloaded");
+                            None
+                        } else {
+                            Some(Ok((url, hash)))
+                        }
+                    }
+
+                    Err(error) => Some(Err(error.into())),
+                },
+
+                None => Some(Ok((url, hash))),
+            }
+        })
+        .try_for_each_concurrent(jobs.get(), |(url, hash)| async move {
+            let bytes = downloader.download(url.clone()).await?;
+            if let Some(expect) = hash {
+                if Sha256::from_slice(&bytes) != expect {
+                    return Err(RefreshError::BadChecksum(url.clone()));
+                }
+            }
+
+            info!(url = url.as_str(), "downloaded");
+
+            let destination = self.locate(url);
+            fs::create_dir_all(&destination).await?;
+            fs::write(destination, &bytes).await?;
+
+            Ok::<_, RefreshError>(())
+        })
         .await
     }
 }
