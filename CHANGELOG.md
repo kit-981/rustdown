@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - A mandatory argument for specifying the channel a manifest describes so that the correct cache
   metadata can be generated.
+- Generation of channel metadata.
+- An optional argument to configure where the cache will be hosted so that the correct cache
+  metadata can be generated.
 
 ### Changed
 - Updating a cache is now destructive and will prune untracked files and directories.

@@ -35,6 +35,12 @@ pub struct Version {
     pub subminor: usize,
 }
 
+impl Display for Version {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.subminor)
+    }
+}
+
 impl FromStr for Version {
     type Err = ParseVersionError;
 
@@ -137,7 +143,9 @@ impl FromStr for Channel {
 pub mod manifest {
     use crate::digest::Sha256;
     use ahash::AHashMap;
-    use serde::Deserialize;
+    use chrono::NaiveDate;
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
     use url::Url;
 
     /// Represents an artefact.
@@ -146,7 +154,7 @@ pub mod manifest {
     ///
     /// Ideally, this type should be broken up into two with the `available` field acting as a tag but
     /// serde doesn't support non-string tags (<https://github.com/serde-rs/serde/issues/745>).
-    #[derive(Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
     pub struct Artefact {
         pub available: bool,
         pub url: Option<Url>,
@@ -156,22 +164,16 @@ pub mod manifest {
     }
 
     /// Represents data belonging to a package.
-    #[derive(Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
     pub struct PackageData {
         #[serde(rename = "target")]
-        artefacts: AHashMap<String, Artefact>,
-    }
-
-    impl PackageData {
-        /// Returns the artefacts in the package data.
-        pub fn artefacts(&self) -> impl Iterator<Item = (&String, &Artefact)> {
-            self.artefacts.iter()
-        }
+        pub artefacts: BTreeMap<String, Artefact>,
     }
 
     /// Represents a channel manifest.
-    #[derive(Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
     pub struct Manifest {
+        pub date: NaiveDate,
         #[serde(rename = "pkg")]
         pub packages: AHashMap<String, PackageData>,
     }
@@ -190,6 +192,11 @@ pub mod manifest {
         /// Deserialises a manifest from a slice.
         pub fn from_slice(slice: &[u8]) -> Result<Self, toml::de::Error> {
             toml::from_slice(slice)
+        }
+
+        /// Serialises a manifest into a vector of bytes.
+        pub fn to_vec(&self) -> Vec<u8> {
+            toml::to_vec(self).expect("failed to serialise manifest")
         }
     }
 }

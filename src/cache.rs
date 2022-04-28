@@ -1,9 +1,14 @@
 use crate::{
-    channel::manifest::Manifest,
+    channel::{
+        manifest::{Artefact, Manifest, PackageData},
+        Channel,
+    },
     digest::Sha256,
     download::{self, Downloader},
+    extension::Url as UrlExtension,
 };
 use ahash::AHashSet;
+use chrono::NaiveDate;
 use futures::{stream, StreamExt, TryStreamExt};
 use std::{
     error::Error,
@@ -77,23 +82,83 @@ impl From<io::Error> for RefreshError {
 pub struct Cache {
     path: PathBuf,
     manifest: Manifest,
+    channel: Channel,
+    host: Url,
 }
 
 impl Cache {
     /// Creates a cache from `path`.
     #[inline]
     #[must_use]
-    pub fn new(path: PathBuf, manifest: Manifest) -> Self {
-        Self { path, manifest }
+    pub fn new(path: PathBuf, manifest: Manifest, channel: Channel, host: Url) -> Self {
+        Self {
+            path,
+            manifest,
+            channel,
+            host,
+        }
     }
 
-    /// Locates an artefact URL in the cache.
     #[inline]
     #[must_use]
-    fn locate(&self, url: &Url) -> PathBuf {
-        let path = self.path.join(Path::new(url.path()).as_relative());
-        assert!(!path.starts_with("/"));
-        path
+    fn date(&self) -> NaiveDate {
+        match self.channel {
+            Channel::Stable(_) => self.manifest.date,
+            Channel::DateBased { name: _, date } => date,
+        }
+    }
+
+    /// Locates an artefact in the cache identified by it's date and file name.
+    #[inline]
+    #[must_use]
+    pub fn artefact(&self, file_name: &str) -> String {
+        format!("dist/{}/{}", self.date().format("%Y-%m-%d"), file_name)
+    }
+
+    /// Normalises a manifest.
+    ///
+    /// This transformation sanitises a manifest by ensuring that every artefact resides at a
+    /// consistent location relative to `root`.
+    #[must_use]
+    fn normalise(&self) -> Manifest {
+        Manifest {
+            date: self.date(),
+            packages: self
+                .manifest
+                .packages
+                .iter()
+                .map(|(package, data)| {
+                    (
+                        package.clone(),
+                        PackageData {
+                            artefacts: data
+                                .artefacts
+                                .iter()
+                                .map(|(name, artefact)| {
+                                    (name.clone(), {
+                                        let transform = |url: &Url| {
+                                            self.host
+                                                .join(&self.artefact(
+                                                    url.file_name().expect("url has no file name"),
+                                                ))
+                                                .expect("url cannot be joined")
+                                        };
+
+                                        Artefact {
+                                            available: artefact.available,
+                                            url: artefact.url.as_ref().map(transform),
+                                            hash: artefact.hash,
+                                            xz_url: artefact.xz_url.as_ref().map(transform),
+                                            xz_hash: artefact.xz_hash,
+                                        }
+                                    })
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 
     async fn prune(&self, preserve: AHashSet<PathBuf>) -> Result<(), io::Error> {
@@ -149,10 +214,14 @@ impl Cache {
             .manifest
             .packages()
             .flat_map(|(_, data)| {
-                data.artefacts()
+                data.artefacts
+                    .iter()
                     .flat_map(|(_, artefact)| artefact.url.iter().chain(artefact.xz_url.iter()))
             })
-            .map(|url| self.locate(url))
+            .map(|url| {
+                self.path
+                    .join(self.artefact(url.file_name().expect("artefact has no file name")))
+            })
             .collect();
 
         self.prune(preserve).await?;
@@ -161,7 +230,7 @@ impl Cache {
         info!("found {} packages", self.manifest.npackages());
         stream::iter(self.manifest.packages().flat_map(|(package, data)| {
             info!(package = package.as_str(), "found package");
-            data.artefacts().flat_map(|(_, artefact)| {
+            data.artefacts.iter().flat_map(|(_, artefact)| {
                 artefact
                     .url
                     .iter()
@@ -171,7 +240,13 @@ impl Cache {
         }))
         .filter_map(|(url, hash)| async move {
             match hash {
-                Some(expect) => match Sha256::from_file(&self.locate(url)).await {
+                Some(expect) => match Sha256::from_file(
+                    &self
+                        .path
+                        .join(self.artefact(url.file_name().expect("artefact has no file name"))),
+                )
+                .await
+                {
                     Ok(actual) => {
                         if expect == actual {
                             info!(url = url.as_str(), "already downloaded");
@@ -197,12 +272,29 @@ impl Cache {
 
             info!(url = url.as_str(), "downloaded");
 
-            let destination = self.locate(url);
+            let destination = self
+                .path
+                .join(self.artefact(url.file_name().expect("artefact has no file name")));
             fs::create_dir_all(&destination).await?;
             fs::write(destination, &bytes).await?;
 
             Ok::<_, RefreshError>(())
         })
-        .await
+        .await?;
+
+        let manifest = self.normalise();
+
+        let date = self.date().format("%Y-%m-%d");
+        let path = match &self.channel {
+            Channel::Stable(version) => {
+                format!("dist/{}/channel-rust-{}.toml", date, version)
+            }
+            Channel::DateBased { name, date: _ } => {
+                format!("dist/{}/channel-rust-{}.toml", date, name)
+            }
+        };
+
+        fs::write(self.path.join(&path), &manifest.to_vec()).await?;
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{
     fmt::{self, Display, Formatter},
@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::{fs::File, io::AsyncReadExt};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct Sha256(#[serde(with = "hex")] pub [u8; 32]);
 
 impl Sha256 {

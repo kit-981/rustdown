@@ -5,6 +5,7 @@ mod cache;
 mod channel;
 mod digest;
 mod download;
+mod extension;
 
 use cache::Cache;
 use channel::{manifest::Manifest, Channel};
@@ -14,6 +15,7 @@ use eyre::{eyre, Result, WrapErr};
 use std::{num::NonZeroUsize, path::PathBuf};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{info, Level};
+use url::Url;
 
 async fn synchronise(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
     cache.refresh(&Downloader::default(), jobs).await?;
@@ -28,6 +30,12 @@ async fn synchronise(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
 struct Arguments {
     /// The path of the cache.
     path: PathBuf,
+
+    /// The URL describing where the cache will be hosted.
+    ///
+    /// The file system location of the cache will be used when this argument is not provided.
+    #[clap(long)]
+    host: Option<Url>,
 
     /// The path to the channel manifest.
     #[clap(short, long)]
@@ -54,6 +62,11 @@ async fn main() -> Result<()> {
         .with_max_level(arguments.log_level)
         .init();
 
+    let host = arguments.host.unwrap_or(
+        Url::from_directory_path(&arguments.path)
+            .map_err(|_| eyre!("failed to convert the path to a url"))?,
+    );
+
     let mut bytes = Vec::new();
     let mut file = File::open(arguments.manifest)
         .await
@@ -66,6 +79,6 @@ async fn main() -> Result<()> {
     let manifest =
         Manifest::from_slice(bytes.as_slice()).wrap_err(eyre!("failed to deserialise manifest"))?;
 
-    let cache = Cache::new(arguments.path, manifest);
+    let cache = Cache::new(arguments.path, manifest, arguments.channel, host);
     synchronise(&cache, arguments.jobs).await
 }
