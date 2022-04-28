@@ -282,7 +282,7 @@ impl Cache {
         })
         .await?;
 
-        let manifest = self.normalise();
+        let bytes = self.normalise().to_vec();
 
         let date = self.date().format("%Y-%m-%d");
         let path = match &self.channel {
@@ -294,7 +294,16 @@ impl Cache {
             }
         };
 
-        fs::write(self.path.join(&path), &manifest.to_vec()).await?;
+        fs::write(self.path.join(&path), &bytes).await?;
+
+        // Install aliased manifest.
+        fs::write(
+            self.path
+                .join(format!("dist/channel-rust-{}.toml", self.channel.name())),
+            &bytes,
+        )
+        .await?;
+
         Ok(())
     }
 }

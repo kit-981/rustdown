@@ -118,6 +118,15 @@ pub enum Channel {
     DateBased { name: String, date: NaiveDate },
 }
 
+impl Channel {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stable(_) => "stable",
+            Self::DateBased { name, date: _ } => name,
+        }
+    }
+}
+
 impl FromStr for Channel {
     type Err = ParseChannelError;
 
