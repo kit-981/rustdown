@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- A mandatory argument for specifying the channel a manifest describes so that the correct cache
+  metadata can be generated.
+
 ### Changed
 - Updating a cache is now destructive and will prune untracked files and directories.
 

@@ -1,5 +1,5 @@
 use crate::{
-    channel::Manifest,
+    channel::manifest::Manifest,
     digest::Sha256,
     download::{self, Downloader},
 };

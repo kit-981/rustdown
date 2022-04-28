@@ -7,7 +7,7 @@ mod digest;
 mod download;
 
 use cache::Cache;
-use channel::Manifest;
+use channel::{manifest::Manifest, Channel};
 use clap::Parser;
 use download::Downloader;
 use eyre::{eyre, Result, WrapErr};
@@ -32,6 +32,10 @@ struct Arguments {
     /// The path to the channel manifest.
     #[clap(short, long)]
     manifest: PathBuf,
+
+    /// The channel that the manifest is for.
+    #[clap(short, long)]
+    channel: Channel,
 
     /// The number of jobs that can run in parallel.
     #[clap(short, long, default_value_t = NonZeroUsize::new(1).unwrap())]
