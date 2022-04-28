@@ -3,6 +3,7 @@ use crate::{
     digest::Sha256,
     download::{self, Downloader},
 };
+use ahash::AHashSet;
 use futures::{stream, StreamExt, TryStreamExt};
 use std::{
     error::Error,
@@ -11,9 +12,10 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
 };
-use tokio::fs;
+use tokio::{fs, task};
 use tracing::info;
 use url::Url;
+use walkdir::WalkDir;
 
 trait PathExt {
     /// Returns a relative version of the path. The return value is the same if the path is already
@@ -94,14 +96,69 @@ impl Cache {
         path
     }
 
+    async fn prune(&self, preserve: AHashSet<PathBuf>) -> Result<(), io::Error> {
+        // There are no obvious ways to prune the cache in parallel without traversing twice. For
+        // instance, the decision to remove a directory is determined by previous decisions.
+        //
+        // Despite this, it's probably faster to first remove all undesired files in parallel before
+        // synchronously deleting empty directories using a depth-first traversal.
+        let root = self.path.clone();
+        task::spawn_blocking(move || {
+            WalkDir::new(root)
+                // The contents are yielded first so that empty directories can be pruned.
+                .contents_first(true)
+                .into_iter()
+                .try_for_each(|entry| match entry {
+                    Ok(entry) => {
+                        use std::fs;
+
+                        let path = entry.path();
+                        match entry.file_type() {
+                            t if t.is_dir() => match fs::read_dir(path)?.next() {
+                                Some(_) => Ok(()),
+                                None => fs::remove_dir(path),
+                            },
+
+                            t if t.is_file() => {
+                                if preserve.contains(path) {
+                                    Ok(())
+                                } else {
+                                    fs::remove_file(path)
+                                }
+                            }
+
+                            t if t.is_symlink() => fs::remove_file(path),
+
+                            _ => unreachable!(),
+                        }
+                    }
+                    Err(error) => Err(error.into()),
+                })
+        })
+        .await
+        .expect("panicked while pruning cache")
+    }
+
     /// Refreshes the cache.
     pub async fn refresh(
         &self,
         downloader: &Downloader,
         jobs: NonZeroUsize,
     ) -> Result<(), RefreshError> {
-        info!("found {} packages", self.manifest.npackages());
+        let preserve: AHashSet<PathBuf> = self
+            .manifest
+            .packages()
+            .flat_map(|(_, data)| {
+                data.artefacts()
+                    .flat_map(|(_, artefact)| artefact.url.iter().chain(artefact.xz_url.iter()))
+            })
+            .map(|url| self.locate(url))
+            .collect();
 
+        self.prune(preserve).await?;
+        info!("pruned cache");
+
+        info!("found {} packages", self.manifest.npackages());
         stream::iter(self.manifest.packages().flat_map(|(package, data)| {
             info!(package = package.as_str(), "found package");
             data.artefacts().flat_map(|(_, artefact)| {
