@@ -19,21 +19,11 @@ documentation](https://forge.rust-lang.org/infra/channel-layout.html#channel-man
 *rustdown* is unopinionated and will support any manifest in a compatible format.
 
 ```
-$ rustdown --path /path/to/cache --manifest /path/to/manifest sync
+$ rustdown --manifest /path/to/manifest /path/to/cache
 ```
 
 Temporary file system errors (eg. not enough disk space) or network failures (eg. internet outages)
 are recoverable by running the command again until it's successful.
-
-By default, *rustdown* only performs integrity checking before and after downloading a file. This is
-a performance optimisation. However, *rustdown* can also verify existing files.
-
-```
-$ rustdown --path /path/to/cache --manifest /path/to/manifest verify
-```
-
-Verifying may correct unexpected modifications but *rustdown* will never remove files that are not
-tracked by the manifest.
 
 ### Performance
 

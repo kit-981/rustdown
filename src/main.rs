@@ -8,7 +8,7 @@ mod download;
 
 use cache::Cache;
 use channel::Manifest;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use download::Downloader;
 use eyre::{eyre, Result, WrapErr};
 use std::{num::NonZeroUsize, path::PathBuf};
@@ -22,22 +22,11 @@ async fn synchronise(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
     Ok(())
 }
 
-async fn verify(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
-    cache.refresh(&Downloader::default(), jobs).await?;
-
-    info!("verified cache");
-    Ok(())
-}
-
 /// Collects the program arguments.
 #[derive(Parser, Debug)]
 #[clap(version, about)]
 struct Arguments {
-    #[clap(subcommand)]
-    action: Action,
-
     /// The path of the cache.
-    #[clap(short, long)]
     path: PathBuf,
 
     /// The path to the channel manifest.
@@ -51,20 +40,6 @@ struct Arguments {
     /// The log level.
     #[clap(short, long, default_value_t = Level::INFO)]
     log_level: Level,
-}
-
-#[derive(Debug, Subcommand)]
-enum Action {
-    /// Synchronises a cache
-    #[clap(name = "sync")]
-    Synchronise,
-
-    /// Verifies the cache
-    ///
-    /// This will (re)download missing or corrupt files described in the manifest. Files that are
-    /// not described in the manifest are not removed.
-    #[clap(name = "verify")]
-    Verify,
 }
 
 #[tokio::main]
@@ -88,9 +63,5 @@ async fn main() -> Result<()> {
         Manifest::from_slice(bytes.as_slice()).wrap_err(eyre!("failed to deserialise manifest"))?;
 
     let cache = Cache::new(arguments.path, manifest);
-
-    match arguments.action {
-        Action::Synchronise => synchronise(&cache, arguments.jobs).await,
-        Action::Verify => verify(&cache, arguments.jobs).await,
-    }
+    synchronise(&cache, arguments.jobs).await
 }
