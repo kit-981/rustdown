@@ -284,13 +284,16 @@ impl Cache {
 
         let bytes = self.normalise().to_vec();
 
-        let date = self.date().format("%Y-%m-%d");
         let path = match &self.channel {
             Channel::Stable(version) => {
-                format!("dist/{}/channel-rust-{}.toml", date, version)
+                format!("dist/channel-rust-{}.toml", version)
             }
             Channel::DateBased { name, date: _ } => {
-                format!("dist/{}/channel-rust-{}.toml", date, name)
+                format!(
+                    "dist/{}/channel-rust-{}.toml",
+                    self.date().format("%Y-%m-%d"),
+                    name
+                )
             }
         };
 
