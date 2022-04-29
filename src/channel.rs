@@ -28,7 +28,7 @@ impl Display for ParseVersionError {
 
 impl Error for ParseVersionError {}
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Version {
     pub major: usize,
     pub minor: usize,
@@ -112,7 +112,7 @@ impl From<ParseVersionError> for ParseChannelError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub enum Channel {
     Stable(Version),
     DateBased { name: String, date: NaiveDate },
@@ -123,6 +123,15 @@ impl Channel {
         match self {
             Self::Stable(_) => "stable",
             Self::DateBased { name, date: _ } => name,
+        }
+    }
+}
+
+impl Display for Channel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stable(version) => write!(f, "stable:{}", version),
+            Self::DateBased { name, date } => write!(f, "{}:{}", name, date.format("%Y-%m-%d")),
         }
     }
 }
@@ -188,14 +197,22 @@ pub mod manifest {
     }
 
     impl Manifest {
-        /// Returns the number of packages in the manifest.
-        pub fn npackages(&self) -> usize {
-            self.packages.len()
-        }
-
-        /// Returns the packages in the manifest.
-        pub fn packages(&self) -> impl Iterator<Item = (&String, &PackageData)> {
-            self.packages.iter()
+        /// Returns an iterator of files tracked by the manifest and their checksum.
+        pub fn archives(&self) -> impl Iterator<Item = (&Url, Option<&Sha256>)> {
+            self.packages.iter().flat_map(|(_, data)| {
+                data.artefacts.iter().flat_map(|(_, artefact)| {
+                    artefact
+                        .url
+                        .iter()
+                        .map(|url| (url, artefact.hash.as_ref()))
+                        .chain(
+                            artefact
+                                .xz_url
+                                .iter()
+                                .map(|url| (url, artefact.xz_hash.as_ref())),
+                        )
+                })
+            })
         }
 
         /// Deserialises a manifest from a slice.

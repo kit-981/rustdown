@@ -5,11 +5,12 @@ use crate::{
     },
     digest::Sha256,
     download::{self, Downloader},
-    extension::Url as UrlExtension,
+    extension::{Path as PathExtension, Url as UrlExtension},
 };
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use chrono::NaiveDate;
 use futures::{stream, StreamExt, TryStreamExt};
+use itertools::Itertools;
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
@@ -18,7 +19,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{fs, task};
-use tracing::info;
+use tracing::{info, info_span};
+use tracing_futures::Instrument;
 use url::Url;
 use walkdir::WalkDir;
 
@@ -41,39 +43,41 @@ impl PathExt for Path {
 }
 
 #[derive(Debug)]
-pub enum RefreshError {
+pub enum BuildError {
     BadChecksum(Url),
+    BadOverlap,
     Download(download::Error),
     FileSystem(io::Error),
 }
 
-impl Display for RefreshError {
+impl Display for BuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::BadChecksum(url) => write!(f, "bad checksum for '{}'", url),
+            Self::BadOverlap => write!(f, "channels have different overlapping files"),
             Self::Download(error) => error.fmt(f),
             Self::FileSystem(error) => error.fmt(f),
         }
     }
 }
 
-impl Error for RefreshError {
+impl Error for BuildError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::BadChecksum(_) => None,
+            Self::BadChecksum(_) | Self::BadOverlap => None,
             Self::Download(error) => error.source(),
             Self::FileSystem(error) => error.source(),
         }
     }
 }
 
-impl From<download::Error> for RefreshError {
+impl From<download::Error> for BuildError {
     fn from(error: download::Error) -> Self {
         Self::Download(error)
     }
 }
 
-impl From<io::Error> for RefreshError {
+impl From<io::Error> for BuildError {
     fn from(error: io::Error) -> Self {
         Self::FileSystem(error)
     }
@@ -81,8 +85,6 @@ impl From<io::Error> for RefreshError {
 
 pub struct Cache {
     path: PathBuf,
-    manifest: Manifest,
-    channel: Channel,
     host: Url,
 }
 
@@ -90,29 +92,47 @@ impl Cache {
     /// Creates a cache from `path`.
     #[inline]
     #[must_use]
-    pub fn new(path: PathBuf, manifest: Manifest, channel: Channel, host: Url) -> Self {
-        Self {
-            path,
-            manifest,
-            channel,
-            host,
-        }
+    pub fn new(path: PathBuf, host: Url) -> Self {
+        Self { path, host }
     }
 
     #[inline]
     #[must_use]
-    fn date(&self) -> NaiveDate {
-        match self.channel {
-            Channel::Stable(_) => self.manifest.date,
-            Channel::DateBased { name: _, date } => date,
+    fn date(channel: &Channel, manifest: &Manifest) -> NaiveDate {
+        match channel {
+            Channel::Stable(_) => manifest.date,
+            Channel::DateBased { name: _, date } => *date,
         }
     }
 
-    /// Locates an artefact in the cache identified by it's date and file name.
+    /// Returns the relative path of an archive.
     #[inline]
     #[must_use]
-    pub fn artefact(&self, file_name: &str) -> String {
-        format!("dist/{}/{}", self.date().format("%Y-%m-%d"), file_name)
+    fn relative_archive_path(channel: &Channel, manifest: &Manifest, name: &str) -> String {
+        format!(
+            "dist/{}/{}",
+            Self::date(channel, manifest).format("%Y-%m-%d"),
+            name
+        )
+    }
+
+    /// Returns the relative manifest path for the channel.
+    ///
+    /// The official distribution server hosts a large number of stable manifest copies in unusual
+    /// places. These are not replicated here because it is not clear how they are used.
+    #[inline]
+    #[must_use]
+    fn relative_manifest_path(channel: &Channel, manifest: &Manifest) -> String {
+        let date = Self::date(channel, manifest).format("%Y-%m-%d");
+        match channel {
+            Channel::Stable(version) => {
+                format!("dist/channel-rust-{}.toml", version)
+            }
+
+            Channel::DateBased { name, date: _ } => {
+                format!("dist/{}/channel-rust-{}.toml", date, name)
+            }
+        }
     }
 
     /// Normalises a manifest.
@@ -120,11 +140,10 @@ impl Cache {
     /// This transformation sanitises a manifest by ensuring that every artefact resides at a
     /// consistent location relative to `root`.
     #[must_use]
-    fn normalise(&self) -> Manifest {
+    fn normalise_manifest(channel: &Channel, manifest: &Manifest, host: &Url) -> Manifest {
         Manifest {
-            date: self.date(),
-            packages: self
-                .manifest
+            date: Self::date(channel, manifest),
+            packages: manifest
                 .packages
                 .iter()
                 .map(|(package, data)| {
@@ -137,11 +156,12 @@ impl Cache {
                                 .map(|(name, artefact)| {
                                     (name.clone(), {
                                         let transform = |url: &Url| {
-                                            self.host
-                                                .join(&self.artefact(
-                                                    url.file_name().expect("url has no file name"),
-                                                ))
-                                                .expect("url cannot be joined")
+                                            host.join(&Self::relative_archive_path(
+                                                channel,
+                                                manifest,
+                                                url.file_name().expect("url has no file name"),
+                                            ))
+                                            .expect("url cannot be joined")
                                         };
 
                                         Artefact {
@@ -205,107 +225,159 @@ impl Cache {
         .expect("panicked while pruning cache")
     }
 
-    /// Refreshes the cache.
-    pub async fn refresh(
+    /// Builds a cache.
+    #[allow(clippy::too_many_lines)]
+    pub async fn build(
         &self,
+        channels: &AHashMap<Channel, Manifest>,
         downloader: &Downloader,
         jobs: NonZeroUsize,
-    ) -> Result<(), RefreshError> {
-        let preserve: AHashSet<PathBuf> = self
-            .manifest
-            .packages()
-            .flat_map(|(_, data)| {
-                data.artefacts
-                    .iter()
-                    .flat_map(|(_, artefact)| artefact.url.iter().chain(artefact.xz_url.iter()))
+    ) -> Result<(), BuildError> {
+        // Verify that there are no overlapping files.
+        let paths = channels
+            .iter()
+            .flat_map(|(channel, manifest)| {
+                manifest.archives().map(|(archive, _)| {
+                    Self::relative_archive_path(
+                        channel,
+                        manifest,
+                        archive.file_name().expect("unnamed archive"),
+                    )
+                })
             })
-            .map(|url| {
-                self.path
-                    .join(self.artefact(url.file_name().expect("artefact has no file name")))
+            .try_fold(AHashSet::new(), |mut paths, path| {
+                if !paths.insert(path) {
+                    return Err(BuildError::BadOverlap);
+                }
+
+                Ok(paths)
+            })?;
+
+        info!("found {} artefacts", paths.len());
+
+        if self.path.async_try_exists().await? {
+            let preserve = paths
+                .iter()
+                .map(|archive| self.path.join(archive))
+                .collect();
+
+            self.prune(preserve).await?;
+            info!("pruned cache");
+        }
+
+        stream::iter(channels.iter())
+            .flat_map(|(channel, manifest)| {
+                stream::iter(manifest.archives()).map(move |(archive, hash)| {
+                    async move {
+                        let destination = self.path.join(Self::relative_archive_path(
+                            channel,
+                            manifest,
+                            archive.file_name().expect("unnamed archive"),
+                        ));
+
+                        // If the file already exists then the download can be skipped.
+                        if let Some(hash) = hash {
+                            match Sha256::from_file(&destination).await {
+                                Ok(actual) => {
+                                    if *hash == actual {
+                                        info!(
+                                            file = archive.file_name().expect("unnamed archive"),
+                                            "skipped download"
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+                                Err(error) => {
+                                    use std::io::ErrorKind::NotFound;
+
+                                    // Continue executing if not found.
+                                    if error.kind() != NotFound {
+                                        return Err(error.into());
+                                    }
+                                }
+                            }
+                        }
+
+                        fs::create_dir_all(&destination.parent().expect("file has no parent"))
+                            .await?;
+                        let bytes = downloader.download(archive.clone()).await?;
+                        if let Some(hash) = hash {
+                            if Sha256::from_slice(&bytes) != *hash {
+                                return Err(BuildError::BadChecksum(archive.clone()));
+                            }
+                        }
+
+                        fs::write(destination, &bytes).await?;
+                        info!(
+                            file = archive.file_name().expect("unnamed archive"),
+                            "downloaded",
+                        );
+
+                        Ok(())
+                    }
+                    .instrument(info_span!(
+                        "download",
+                        channel = channel.to_string().as_str()
+                    ))
+                })
+            })
+            .map(Ok)
+            .try_buffer_unordered(jobs.get())
+            .try_collect::<()>()
+            .await?;
+
+        let normalised: AHashMap<Channel, Manifest> = channels
+            .iter()
+            .map(|(channel, manifest)| {
+                (
+                    channel.clone(),
+                    Self::normalise_manifest(channel, manifest, &self.host),
+                )
             })
             .collect();
 
-        self.prune(preserve).await?;
-        info!("pruned cache");
+        // Install normalised channel manifests.
+        stream::iter(normalised.clone())
+            .map(|(channel, manifest)| async move {
+                let destination = self
+                    .path
+                    .join(Self::relative_manifest_path(&channel, &manifest));
 
-        info!("found {} packages", self.manifest.npackages());
-        stream::iter(self.manifest.packages().flat_map(|(package, data)| {
-            info!(package = package.as_str(), "found package");
-            data.artefacts.iter().flat_map(|(_, artefact)| {
-                artefact
-                    .url
-                    .iter()
-                    .map(|url| (url, artefact.hash))
-                    .chain(artefact.xz_url.iter().map(|url| (url, artefact.xz_hash)))
+                fs::create_dir_all(destination.parent().expect("file has no parent")).await?;
+                fs::write(destination, manifest.to_vec()).await?;
+
+                Ok::<_, BuildError>(())
             })
-        }))
-        .filter_map(|(url, hash)| async move {
-            match hash {
-                Some(expect) => match Sha256::from_file(
-                    &self
-                        .path
-                        .join(self.artefact(url.file_name().expect("artefact has no file name"))),
-                )
-                .await
-                {
-                    Ok(actual) => {
-                        if expect == actual {
-                            info!(url = url.as_str(), "already downloaded");
-                            None
-                        } else {
-                            Some(Ok((url, hash)))
-                        }
-                    }
+            .map(Ok)
+            .try_buffer_unordered(jobs.get())
+            .try_collect::<()>()
+            .await?;
 
-                    Err(error) => Some(Err(error.into())),
-                },
-
-                None => Some(Ok((url, hash))),
-            }
-        })
-        .try_for_each_concurrent(jobs.get(), |(url, hash)| async move {
-            let bytes = downloader.download(url.clone()).await?;
-            if let Some(expect) = hash {
-                if Sha256::from_slice(&bytes) != expect {
-                    return Err(RefreshError::BadChecksum(url.clone()));
-                }
-            }
-
-            info!(url = url.as_str(), "downloaded");
-
+        // Install normalised channel aliases.
+        stream::iter(
+            normalised
+                .iter()
+                .group_by(|(channel, _)| channel.name())
+                .into_iter()
+                .map(|(_, group)| {
+                    group
+                        .max_by_key(|(channel, _)| *channel)
+                        .expect("missing associated channel")
+                }),
+        )
+        .map(|(channel, manifest)| async {
             let destination = self
                 .path
-                .join(self.artefact(url.file_name().expect("artefact has no file name")));
-            fs::create_dir_all(&destination).await?;
-            fs::write(destination, &bytes).await?;
+                .join(format!("dist/channel-rust-{}.toml", channel.name()));
 
-            Ok::<_, RefreshError>(())
+            fs::create_dir_all(destination.parent().expect("file has no parent")).await?;
+            fs::write(destination, manifest.to_vec()).await?;
+
+            Ok::<_, BuildError>(())
         })
-        .await?;
-
-        let bytes = self.normalise().to_vec();
-
-        let path = match &self.channel {
-            Channel::Stable(version) => {
-                format!("dist/channel-rust-{}.toml", version)
-            }
-            Channel::DateBased { name, date: _ } => {
-                format!(
-                    "dist/{}/channel-rust-{}.toml",
-                    self.date().format("%Y-%m-%d"),
-                    name
-                )
-            }
-        };
-
-        fs::write(self.path.join(&path), &bytes).await?;
-
-        // Install aliased manifest.
-        fs::write(
-            self.path
-                .join(format!("dist/channel-rust-{}.toml", self.channel.name())),
-            &bytes,
-        )
+        .map(Ok)
+        .try_buffer_unordered(jobs.get())
+        .try_collect::<()>()
         .await?;
 
         Ok(())

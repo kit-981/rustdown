@@ -7,29 +7,26 @@ mod digest;
 mod download;
 mod extension;
 
+use ahash::AHashMap;
 use cache::Cache;
 use channel::{manifest::Manifest, Channel};
-use clap::{Arg, Command};
+use clap::{
+    error::ErrorKind::{TooFewValues, ValueValidation},
+    Arg, Command,
+};
 use download::Downloader;
-use eyre::{eyre, Result, WrapErr};
-use std::{env, num::NonZeroUsize, path::PathBuf, str::FromStr};
+use eyre::Result;
+use futures::{stream, StreamExt, TryStreamExt};
+use std::{env, iter::IntoIterator, num::NonZeroUsize, path::PathBuf, str::FromStr};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{info, Level};
 use url::Url;
-
-async fn synchronise(cache: &Cache, jobs: NonZeroUsize) -> Result<()> {
-    cache.refresh(&Downloader::default(), jobs).await?;
-
-    info!("synchronised cache");
-    Ok(())
-}
 
 #[derive(Debug)]
 struct Arguments {
     path: PathBuf,
     host: Url,
-    manifest: PathBuf,
-    channel: Channel,
+    channels: AHashMap<Channel, PathBuf>,
     jobs: NonZeroUsize,
     log_level: Level,
 }
@@ -65,16 +62,12 @@ impl Parser {
                     .short('m')
                     .long("manifest")
                     .takes_value(true)
+                    .multiple_values(true)
+                    .min_values(2)
+                    .multiple_occurrences(true)
+                    .value_names(&["PATH", "CHANNEL"])
                     .required(true)
                     .help("The path to the channel manifest"),
-            )
-            .arg(
-                Arg::new("channel")
-                    .short('c')
-                    .long("channel")
-                    .takes_value(true)
-                    .validator(Channel::from_str)
-                    .help("The channel that the manifest is for"),
             )
             .arg(
                 Arg::new("jobs")
@@ -106,9 +99,39 @@ impl Parser {
             None => Url::from_directory_path(&path).expect("invalid path"),
         };
 
-        let manifest = PathBuf::from(matches.value_of("manifest").expect("missing manifest"));
-        let channel = Channel::from_str(matches.value_of("channel").expect("missing channel"))
-            .expect("invalid channel");
+        let channels = matches
+            .grouped_values_of("manifest")
+            .expect("missing manifest")
+            .into_iter()
+            .map(IntoIterator::into_iter)
+            .map(|mut group| {
+                let path = PathBuf::from(group.next().ok_or_else(|| {
+                    self.command
+                        .clone()
+                        .error(TooFewValues, "missing manifest path")
+                })?);
+
+                let channel = Channel::from_str(group.next().ok_or_else(|| {
+                    self.command
+                        .clone()
+                        .error(TooFewValues, "missing manifest channel")
+                })?)
+                .map_err(|error| self.command.clone().error(ValueValidation, error))?;
+
+                Ok::<_, clap::Error>((channel, path))
+            })
+            .try_fold(AHashMap::new(), |mut map, pair| {
+                let (channel, path) = pair?;
+
+                if map.insert(channel, path).is_some() {
+                    return Err(self
+                        .command
+                        .clone()
+                        .error(ValueValidation, "overloaded channel"));
+                }
+
+                Ok(map)
+            })?;
 
         let jobs = NonZeroUsize::from_str(matches.value_of("jobs").expect("missing jobs"))
             .expect("invalid jobs");
@@ -119,8 +142,7 @@ impl Parser {
         Ok(Arguments {
             path,
             host,
-            manifest,
-            channel,
+            channels,
             jobs,
             log_level,
         })
@@ -138,18 +160,23 @@ async fn main() -> Result<()> {
         .with_max_level(arguments.log_level)
         .init();
 
-    let mut bytes = Vec::new();
-    let mut file = File::open(arguments.manifest)
-        .await
-        .wrap_err(eyre!("failed to open manifest"))?;
+    let channels = stream::iter(arguments.channels.into_iter())
+        .map(|(channel, path)| async {
+            let mut file = File::open(path).await?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).await?;
+            Ok::<_, eyre::Error>((channel, Manifest::from_slice(&bytes)?))
+        })
+        .map(Ok)
+        .try_buffer_unordered(arguments.jobs.get())
+        .try_collect::<AHashMap<Channel, Manifest>>()
+        .await?;
 
-    file.read_to_end(&mut bytes)
-        .await
-        .wrap_err(eyre!("failed to read manifest"))?;
+    let cache = Cache::new(arguments.path, arguments.host);
+    cache
+        .build(&channels, &Downloader::default(), arguments.jobs)
+        .await?;
 
-    let manifest =
-        Manifest::from_slice(bytes.as_slice()).wrap_err(eyre!("failed to deserialise manifest"))?;
-
-    let cache = Cache::new(arguments.path, manifest, arguments.channel, arguments.host);
-    synchronise(&cache, arguments.jobs).await
+    info!("built cache");
+    Ok(())
 }
