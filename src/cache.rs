@@ -161,6 +161,7 @@ impl Cache {
         }
     }
 
+    /// Deletes files that should be preserved. Empty directories are removed.
     async fn prune(&self, preserve: AHashSet<PathBuf>) -> Result<(), io::Error> {
         // There are no obvious ways to prune the cache in parallel without traversing twice. For
         // instance, the decision to remove a directory is determined by previous decisions.
