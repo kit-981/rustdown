@@ -74,6 +74,7 @@ impl Parser {
                     .short('j')
                     .long("jobs")
                     .takes_value(true)
+                    .default_value("1")
                     .validator(NonZeroUsize::from_str)
                     .help("The number of jobs that can run in parallel"),
             )
