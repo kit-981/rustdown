@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generation of channel metadata.
 - An optional argument to configure where the cache will be hosted so that the correct cache
   metadata can be generated.
+- Support for downloading multiple channels.
 
 ### Changed
 - Updating a cache is now destructive and will prune untracked files and directories.
