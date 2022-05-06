@@ -33,8 +33,7 @@ complete.
 
 ### Mirroring
 
-The layout of the cache matches the layout of the remote server. The contents of the cache can by
-hosted by any static web server.
+The contents of the cache can by hosted by any static web server.
 
 *rustup* [describes a series of environment
 variables](https://rust-lang.github.io/rustup/environment-variables.html) that can be set to
