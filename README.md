@@ -19,7 +19,7 @@ documentation](https://forge.rust-lang.org/infra/channel-layout.html#channel-man
 *rustdown* is unopinionated and will support any manifest in a compatible format.
 
 ```
-$ rustdown --manifest /path/to/manifest /path/to/cache
+$ rustdown --manifest /path/to/manifest stable:1.60.0 /path/to/cache
 ```
 
 Temporary file system errors (eg. not enough disk space) or network failures (eg. internet outages)
