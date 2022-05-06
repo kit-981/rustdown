@@ -233,31 +233,36 @@ impl Cache {
         downloader: &Downloader,
         jobs: NonZeroUsize,
     ) -> Result<(), BuildError> {
-        // Verify that there are no overlapping files.
-        let paths = channels
+        // Verify that there are no overlapping files with different checksums.
+        let archives = channels
             .iter()
             .flat_map(|(channel, manifest)| {
-                manifest.archives().map(|(archive, _)| {
-                    Self::relative_archive_path(
-                        channel,
-                        manifest,
-                        archive.file_name().expect("unnamed archive"),
+                manifest.archives().map(|(archive, checksum)| {
+                    (
+                        Self::relative_archive_path(
+                            channel,
+                            manifest,
+                            archive.file_name().expect("unnamed archive"),
+                        ),
+                        checksum,
                     )
                 })
             })
-            .try_fold(AHashSet::new(), |mut paths, path| {
-                if !paths.insert(path) {
-                    return Err(BuildError::BadOverlap);
+            .try_fold(AHashMap::new(), |mut paths, (path, checksum)| {
+                if let Some(found) = paths.insert(path, checksum) {
+                    if checksum != found {
+                        return Err(BuildError::BadOverlap);
+                    }
                 }
 
                 Ok(paths)
             })?;
 
-        info!("found {} artefacts", paths.len());
+        info!("found {} artefacts", archives.len());
 
         if self.path.async_try_exists().await? {
-            let preserve = paths
-                .iter()
+            let preserve = archives
+                .keys()
                 .map(|archive| self.path.join(archive))
                 .collect();
 
@@ -267,6 +272,7 @@ impl Cache {
 
         stream::iter(channels.iter())
             .flat_map(|(channel, manifest)| {
+                // TODO: We might download duplicate files more than once?
                 stream::iter(manifest.archives()).map(move |(archive, hash)| {
                     async move {
                         let destination = self.path.join(Self::relative_archive_path(
