@@ -32,12 +32,12 @@ struct Arguments {
 }
 
 #[derive(Debug)]
-struct Parser {
-    command: Command<'static>,
+struct Parser<'a> {
+    command: Command<'a>,
 }
 
-impl Parser {
-    fn new() -> Self {
+impl<'a> Parser<'a> {
+    fn new(ncpus: &'a str) -> Self {
         let command = Command::new(env!("CARGO_PKG_NAME"))
             .version(env!("CARGO_PKG_VERSION"))
             .author(env!("CARGO_PKG_AUTHORS"))
@@ -74,7 +74,7 @@ impl Parser {
                     .short('j')
                     .long("jobs")
                     .takes_value(true)
-                    .default_value("1")
+                    .default_value(ncpus)
                     .validator(NonZeroUsize::from_str)
                     .help("The number of jobs that can run in parallel"),
             )
@@ -152,7 +152,8 @@ impl Parser {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let arguments = Parser::new()
+    let ncpus = num_cpus::get();
+    let arguments = Parser::new(&ncpus.to_string())
         .parse(env::args().into_iter())
         .map_err(|error| error.exit())
         .expect("unhandled error");

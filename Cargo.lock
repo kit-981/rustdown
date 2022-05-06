@@ -883,6 +883,7 @@ dependencies = [
  "futures",
  "hex",
  "itertools",
+ "num_cpus",
  "reqwest",
  "serde",
  "sha2",
