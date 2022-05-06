@@ -25,12 +25,6 @@ $ rustdown --manifest /path/to/manifest stable:1.60.0 /path/to/cache
 Temporary file system errors (eg. not enough disk space) or network failures (eg. internet outages)
 are recoverable by running the command again until it's successful.
 
-### Performance
-
-It is strongly recommended to use the `jobs` argument. This argument configures the number of
-actions that `rustdown` will perform in parallel. This will reduce the time operations require to
-complete.
-
 ### Mirroring
 
 The contents of the cache can by hosted by any static web server.
