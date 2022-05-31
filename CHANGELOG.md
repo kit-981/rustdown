@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An optional argument to configure where the cache will be hosted so that the correct cache
   metadata can be generated.
 - Support for downloading multiple channels.
+- Support for the optional `version` and `git_commit_hash` package data fields.
 
 ### Changed
 - Updating a cache is now destructive and will prune untracked files and directories.
+- The default number of parallel jobs is now generated based on hardware information.
 
 ### Removed
 - Subcommands have been removed in favour of a single consistent behaviour.
