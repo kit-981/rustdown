@@ -150,6 +150,8 @@ impl Cache {
                     (
                         package.clone(),
                         PackageData {
+                            version: data.version.clone(),
+                            git_commit_hash: data.git_commit_hash.clone(),
                             artefacts: data
                                 .artefacts
                                 .iter()

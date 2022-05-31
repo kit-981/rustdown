@@ -184,6 +184,8 @@ pub mod manifest {
     /// Represents data belonging to a package.
     #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
     pub struct PackageData {
+        pub version: Option<String>,
+        pub git_commit_hash: Option<String>,
         #[serde(rename = "target")]
         pub artefacts: BTreeMap<String, Artefact>,
     }
